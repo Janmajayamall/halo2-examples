@@ -1,9 +1,10 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, usize};
 
 use halo2_proofs::{
     arithmetic::FieldExt,
     circuit::{AssignedCell, Layouter},
-    plonk::{Assigned, ConstraintSystem, Error},
+    plonk::{Advice, Assigned, Column, ConstraintSystem, Error, Expression, Selector, TableColumn},
+    poly::Rotation,
 };
 
 /// This gadget range-constrains an element witnessed in the circuit to be N bits.
@@ -48,19 +49,45 @@ struct DecomposeConfig<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_R
     // A selector to constrain the running sum;
     // A selector to lookup the K-bit chunks;
     // And of course, the K-bit lookup table
-    table: RangeTableConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>,
+    q_running_sum: Selector,
+    q_lookup: Selector,
+    z: Column<Advice>,
+    table_col: TableColumn,
+    // table: RangeTableConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>,
     _marker: PhantomData<F>,
 }
 
-impl<F: FieldExt, const LOOKUP_NUM_BITS: usize> DecomposeConfig<F, LOOKUP_NUM_BITS> {
-    fn configure(meta: &mut ConstraintSystem<F>) -> Self {
+impl<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize>
+    DecomposeConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>
+{
+    pub fn configure(meta: &mut ConstraintSystem<F>, z: Column<Advice>) -> Self {
         // Create the needed columns and internal configs.
+        let q_running_sum = meta.selector();
+        let q_lookup = meta.complex_selector();
+
+        let config = DecomposeConfig {
+            q_running_sum,
+            q_lookup,
+            z,
+            // table,
+            _marker: PhantomData,
+        };
 
         // Check that each interstitial value of the running sum is composed correctly from the previous one.
-        meta.create_gate(|| "z_{i+1} = (z_i - c_i) * 2^{-K}", |meta| todo!());
+        // meta.create_gate("z_{i+1} = (z_i - c_i) * 2^{-K}", |meta| todo!());
 
         // Range-constrain each K-bit chunk `c_i = z_i - z_{i+1} * 2^K` derived from the running sum.
-        meta.lookup(|meta| todo!());
+        meta.lookup(|meta| {
+            let q_lookup = meta.query_selector(q_lookup);
+
+            let z = meta.query_advice(config.z, Rotation::cur());
+            let z_next = meta.query_advice(config.z, Rotation::cur());
+            let c = z - (z_next * Expression::Constant(FieldExt::from_u128(1 << LOOKUP_NUM_BITS)));
+
+            vec![(q_lookup * c, config.table_col)]
+        });
+
+        config
     }
 
     fn assign(
