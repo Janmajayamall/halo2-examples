@@ -1,5 +1,5 @@
 use core::num;
-use std::{marker::PhantomData, slice::Windows, usize};
+use std::{default, marker::PhantomData, slice::Windows, usize};
 
 use halo2_proofs::{
     arithmetic::FieldExt,
@@ -58,7 +58,7 @@ struct DecomposeConfig<
     q_running_sum: Selector,
     q_lookup: Selector,
     z: Column<Advice>,
-    table_col: TableColumn,
+    table: TableColumn,
     // table: RangeTableConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>,
     _marker: PhantomData<F>,
 }
@@ -66,7 +66,11 @@ struct DecomposeConfig<
 impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize>
     DecomposeConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>
 {
-    pub fn configure(meta: &mut ConstraintSystem<F>, z: Column<Advice>) -> Self {
+    pub fn configure(
+        meta: &mut ConstraintSystem<F>,
+        z: Column<Advice>,
+        table: TableColumn,
+    ) -> Self {
         // Create the needed columns and internal configs.
         let q_running_sum = meta.selector();
         let q_lookup = meta.complex_selector();
@@ -75,7 +79,7 @@ impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RA
             q_running_sum,
             q_lookup,
             z,
-            // table,
+            table,
             _marker: PhantomData,
         };
 
@@ -90,7 +94,7 @@ impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RA
             let z_next = meta.query_advice(config.z, Rotation::cur());
             let c = z - (z_next * Expression::Constant(FieldExt::from_u128(1 << LOOKUP_NUM_BITS)));
 
-            vec![(q_lookup * c, config.table_col)]
+            vec![(q_lookup * c, config.table)]
         });
 
         config
@@ -112,14 +116,14 @@ impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RA
             || "range check",
             |mut region: Region<'_, F>| {
                 self.q_lookup.enable(&mut region, offset)?;
-                z_0.copy_advice(|| "z_0", &mut region, self.z, offset);
+                z_0.copy_advice(|| "z_0", &mut region, self.z, offset)?;
 
                 let words = z_0
                     .value()
                     .map(|v| decompose_word::<F>(v, num_bits, 1 << LOOKUP_NUM_BITS));
 
                 let mut z_last = z_0.value().copied();
-                let mut last_cell;
+                let mut last_cell = z_0.clone();
 
                 let two_pow_k_inv =
                     Value::known(F::from(1 << LOOKUP_NUM_BITS as u64).invert().unwrap());
@@ -127,7 +131,7 @@ impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RA
                     let word = word.map(|word| F::from(word as u64));
 
                     let z_curr = (z_last - word) * two_pow_k_inv;
-                    z_last = z_curr.clone();
+                    z_last = z_curr;
 
                     last_cell = region.assign_advice(
                         || format!("z_{}", i),
@@ -139,7 +143,7 @@ impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RA
 
                 region.constrain_constant(last_cell.cell(), F::zero())
             },
-        );
+        )?;
 
         Ok(())
     }

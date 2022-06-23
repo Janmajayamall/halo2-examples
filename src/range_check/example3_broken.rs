@@ -59,7 +59,11 @@ impl<F: FieldExt, const NUM_BITS: usize, const RANGE: usize> RangeCheckConfig<F,
             // THIS IS BROKEN!!!!!!
             // Hint: consider the case where q_lookup = 0. What are our input expressions to the lookup argument then?
             vec![
-                (q_lookup.clone() * num_bits, table.num_bits),
+                (
+                    (q_lookup.clone() * num_bits)
+                        + (Expression::Constant(F::one()) - q_lookup.clone()),
+                    table.num_bits,
+                ),
                 (q_lookup * value, table.value),
             ]
         });
