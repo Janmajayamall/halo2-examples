@@ -1,8 +1,10 @@
-use std::{marker::PhantomData, usize};
+use core::num;
+use std::{marker::PhantomData, slice::Windows, usize};
 
 use halo2_proofs::{
     arithmetic::FieldExt,
-    circuit::{AssignedCell, Layouter},
+    circuit::{AssignedCell, Layouter, Region, Value},
+    pasta::group::ff::PrimeFieldBits,
     plonk::{Advice, Assigned, Column, ConstraintSystem, Error, Expression, Selector, TableColumn},
     poly::Rotation,
 };
@@ -44,7 +46,11 @@ use halo2_proofs::{
 /// (even non-multiples of K)
 
 #[derive(Debug, Clone)]
-struct DecomposeConfig<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize> {
+struct DecomposeConfig<
+    F: FieldExt + PrimeFieldBits,
+    const LOOKUP_NUM_BITS: usize,
+    const LOOKUP_RANGE: usize,
+> {
     // You'll need an advice column to witness your running sum;
     // A selector to constrain the running sum;
     // A selector to lookup the K-bit chunks;
@@ -57,7 +63,7 @@ struct DecomposeConfig<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_R
     _marker: PhantomData<F>,
 }
 
-impl<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize>
+impl<F: FieldExt + PrimeFieldBits, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize>
     DecomposeConfig<F, LOOKUP_NUM_BITS, LOOKUP_RANGE>
 {
     pub fn configure(meta: &mut ConstraintSystem<F>, z: Column<Advice>) -> Self {
@@ -93,12 +99,71 @@ impl<F: FieldExt, const LOOKUP_NUM_BITS: usize, const LOOKUP_RANGE: usize>
     fn assign(
         &self,
         mut layouter: impl Layouter<F>,
-        value: AssignedCell<Assigned<F>, F>,
+        z_0: AssignedCell<F, F>,
         num_bits: usize,
+        num_of_windows: usize,
     ) -> Result<(), Error> {
+        let offset = 0;
         // 1. Compute the interstitial running sum values {z_0, ..., z_C}}
         // 2. Assign the running sum values
         // 3. Make sure to enable the relevant selector on each row of the running sum
-        todo!()
+
+        layouter.assign_region(
+            || "range check",
+            |mut region: Region<'_, F>| {
+                self.q_lookup.enable(&mut region, offset)?;
+                z_0.copy_advice(|| "z_0", &mut region, self.z, offset);
+
+                let words = z_0
+                    .value()
+                    .map(|v| decompose_word::<F>(v, num_bits, 1 << LOOKUP_NUM_BITS));
+
+                let mut z_last = z_0.value().copied();
+                let mut last_cell;
+
+                let two_pow_k_inv =
+                    Value::known(F::from(1 << LOOKUP_NUM_BITS as u64).invert().unwrap());
+                for (i, word) in words.transpose_vec(num_of_windows).into_iter().enumerate() {
+                    let word = word.map(|word| F::from(word as u64));
+
+                    let z_curr = (z_last - word) * two_pow_k_inv;
+                    z_last = z_curr.clone();
+
+                    last_cell = region.assign_advice(
+                        || format!("z_{}", i),
+                        self.z,
+                        offset + 1 + i,
+                        || z_last,
+                    )?;
+                }
+
+                region.constrain_constant(last_cell.cell(), F::zero())
+            },
+        );
+
+        Ok(())
     }
+}
+
+/// [Ref]
+fn decompose_word<F: PrimeFieldBits>(
+    word: &F,
+    word_num_bits: usize,
+    window_num_bits: usize,
+) -> Vec<u8> {
+    let padding = (window_num_bits - (word_num_bits % window_num_bits)) % window_num_bits;
+    let bits: Vec<bool> = word
+        .to_le_bits()
+        .into_iter()
+        .take(word_num_bits)
+        .chain(std::iter::repeat(false).take(padding))
+        .collect();
+    bits.chunks_exact(window_num_bits)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .rev()
+                .fold(0, |acc, val| (acc << 1) + *val as u8)
+        })
+        .collect()
 }
